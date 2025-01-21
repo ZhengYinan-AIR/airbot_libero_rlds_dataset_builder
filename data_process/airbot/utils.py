@@ -12,7 +12,20 @@ from absl import app, flags, logging
 from functools import partial
 from multiprocessing import Pool
 
+DATA_DIR = '/data/rsp_data'
+
+def tensor_feature(value):
+    return tf.train.Feature(
+        bytes_list=tf.train.BytesList(value=[tf.io.serialize_tensor(value).numpy()])
+    )
+
+def string_to_feature(str_value):
+    return tf.train.Feature(
+        bytes_list=tf.train.BytesList(value=[str_value.encode("UTF-8")])
+    )
+
 def squash(path): 
+    path = os.path.join(DATA_DIR, path)
     im = Image.open(path)
     out = np.asarray(im).astype(np.uint8)
     return out
@@ -25,7 +38,7 @@ def split_and_categorize_trajectories(data_list):
 
     for item in tqdm(data_list, desc='split into trajectories'):
         # Split the path by '/' and get relevant segments
-        third_image_path_parts = item["third_image"].split('/')
+        third_image_path_parts = item["top_image"].split('/')
         
         # Assume both paths are similar, so take the fourth-to-last and third-to-last segments
         category = third_image_path_parts[-4]  # e.g., "duck_in_blue_bowl"
@@ -85,4 +98,57 @@ def process_dc(task, trajectories, outpath_train, outpath_val, train_proportion)
             file_name = f'{task}_episode_{str(val_ep)}.npy'
             with tf.io.gfile.GFile(tf.io.gfile.join(outpath_val, file_name), "wb") as f:
                 np.save(f, episode)
+            val_ep += 1
+
+
+def process_bridge_tf(task, trajectories, outpath_train, outpath_val, train_proportion):
+    
+    all_traj = trajectories[task]
+    random.shuffle(all_traj)
+    num_traj = len(all_traj)
+    
+    train_ep = 0
+    val_ep = 0
+
+    for itraj, tp in tqdm(enumerate(all_traj), desc=f'Processing {task} data'):
+        
+        images = []
+
+        for step in tp:
+            images.append(squash(step['side_image']))
+            
+        language_instruction = step['instruction']
+        images = np.array(images, dtype=np.uint8)
+
+        if itraj < int(num_traj * train_proportion):
+            file_name = f'{task}_episode_{str(train_ep)}.tfrecord'
+            output_tfrecord_path = tf.io.gfile.join(outpath_train, file_name)
+
+            with tf.io.TFRecordWriter(output_tfrecord_path) as writer:
+                example = tf.train.Example(
+                    features=tf.train.Features(
+                        feature={
+                            "obs" : tensor_feature(images),
+                            "lang" : string_to_feature(language_instruction)
+                        }
+                    )
+                )
+                writer.write(example.SerializeToString())
+
+            train_ep += 1
+        else:
+            file_name = f'{task}_episode_{str(val_ep)}.tfrecord'
+            output_tfrecord_path = tf.io.gfile.join(outpath_val, file_name)
+
+            with tf.io.TFRecordWriter(output_tfrecord_path) as writer:
+                example = tf.train.Example(
+                    features=tf.train.Features(
+                        feature={
+                            "obs" : tensor_feature(images),
+                            "lang" : string_to_feature(language_instruction)
+                        }
+                    )
+                )
+                writer.write(example.SerializeToString())
+
             val_ep += 1
